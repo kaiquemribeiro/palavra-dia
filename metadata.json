@@ -1,4 +1,6 @@
 {
   "name": "Palavra-Dia",
-  "description": "Um jogo de adivinhação de palavras no estilo Wordle, construído com React e Tailwind CSS. Adivinhe a palavra de 5 letras em 6 tentativas." 
+  "description": "Um jogo de adivinhação de palavras no estilo Wordle, construído com React e Tailwind CSS. Adivinhe a palavra de 5 letras em 6 tentativas. Desfrute de animações e um design moderno.",
+  "requestFramePermissions": [],
+  "prompt": ""
 }
