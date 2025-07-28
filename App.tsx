@@ -1,349 +1,360 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { WORDS, WORD_LENGTH, MAX_GUESSES } from './constants';
-import { GameState, LetterState, GameStats, GuessDistribution } from './types';
-import Grid from './components/Grid';
+import GameBoard from './components/GameBoard';
+import EndGameModal from './components/EndGameModal';
+import Hint from './components/Hint';
 import Keyboard from './components/Keyboard';
-import Modal from './components/Modal';
-import Fireworks from './components/Fireworks';
-import StatsModal from './components/StatsModal';
-import { QuestionMarkCircleIcon, LightBulbIcon, ArrowPathIcon, XMarkIcon, ChartBarIcon } from '@heroicons/react/24/outline';
-import { GoogleGenAI } from "@google/genai";
+import { getNewWord } from './services/wordService';
+import { getWordHint } from './services/geminiService';
+import { GameStatus, LetterState, PenaltyType, GuessState } from './types';
+import { WORD_LENGTH, MAX_GUESSES } from './constants';
+import { BrainCircuit, Sun, Moon, BadgeX } from 'lucide-react';
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getLetterStates = (guess: string, solution: string): LetterState[] => {
+  const states: LetterState[] = Array(WORD_LENGTH).fill(LetterState.Absent);
+  if (!guess || !solution) return states;
 
-const getInitialState = () => {
-    const solution = WORDS[Math.floor(Math.random() * WORDS.length)];
-    console.log("Palavra correta:", solution); // For debugging
-    return {
-        solution,
-        gameState: GameState.Playing,
-        guesses: [],
-        currentGuess: '',
-        turn: 0,
-        usedKeys: {},
-        isShaking: false,
-        hint: null,
-        hintUsed: false,
-        isHintLoading: false,
-    };
-};
-
-const getGuessStates = (guess: string, solution: string): LetterState[] => {
   const solutionChars = solution.split('');
   const guessChars = guess.split('');
-  const states: LetterState[] = Array(WORD_LENGTH).fill(LetterState.Absent);
-  const solutionLetterCount: Record<string, number> = {};
+  const usedSolutionIndices = new Set<number>();
 
-  solutionChars.forEach(letter => {
-    solutionLetterCount[letter] = (solutionLetterCount[letter] || 0) + 1;
-  });
-
-  // 1st pass: find correct (green) letters
-  guessChars.forEach((letter, index) => {
-    if (solutionChars[index] === letter) {
-      states[index] = LetterState.Correct;
-      solutionLetterCount[letter] -= 1;
+  // First pass: find correct letters
+  guessChars.forEach((char, i) => {
+    if (solutionChars[i] === char) {
+      states[i] = LetterState.Correct;
+      usedSolutionIndices.add(i);
     }
   });
 
-  // 2nd pass: find present (yellow) letters
-  guessChars.forEach((letter, index) => {
-    if (states[index] !== LetterState.Correct) {
-      if (solutionLetterCount[letter] > 0) {
-        states[index] = LetterState.Present;
-        solutionLetterCount[letter] -= 1;
-      }
+  // Second pass: find present letters
+  guessChars.forEach((char, i) => {
+    if (states[i] === LetterState.Correct) return;
+
+    const presentIndex = solutionChars.findIndex(
+      (solChar, j) => !usedSolutionIndices.has(j) && solChar === char
+    );
+
+    if (presentIndex !== -1) {
+      states[i] = LetterState.Present;
+      usedSolutionIndices.add(presentIndex);
     }
   });
 
   return states;
 };
 
-
-const defaultStats: GameStats = {
-    gamesPlayed: 0,
-    wins: 0,
-    currentStreak: 0,
-    maxStreak: 0,
-    guessDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
+const shuffleArray = <T,>(array: T[]): T[] => {
+  return [...array].sort(() => Math.random() - 0.5);
 };
 
 
-function App() {
-    const [solution, setSolution] = useState(getInitialState().solution);
-    const [gameState, setGameState] = useState(getInitialState().gameState);
-    const [guesses, setGuesses] = useState<string[]>(getInitialState().guesses);
-    const [currentGuess, setCurrentGuess] = useState(getInitialState().currentGuess);
-    const [turn, setTurn] = useState(getInitialState().turn);
-    const [usedKeys, setUsedKeys] = useState<{ [key: string]: LetterState }>(getInitialState().usedKeys);
-    const [isShaking, setIsShaking] = useState(false);
-    
-    const [showHelpModal, setShowHelpModal] = useState(false);
-    const [showStatsModal, setShowStatsModal] = useState(false);
-    const [showCopiedToast, setShowCopiedToast] = useState(false);
-    
-    // AI Hint State
-    const [hint, setHint] = useState<string | null>(getInitialState().hint);
-    const [hintUsed, setHintUsed] = useState(getInitialState().hintUsed);
-    const [isHintLoading, setIsHintLoading] = useState(getInitialState().isHintLoading);
+const App: React.FC = () => {
+  const [solution, setSolution] = useState<string>('');
+  const [guesses, setGuesses] = useState<GuessState[]>([]);
+  const [currentGuess, setCurrentGuess] = useState<string>('');
+  const [currentRowIndex, setCurrentRowIndex] = useState<number>(0);
+  const [gameStatus, setGameStatus] = useState<GameStatus>(GameStatus.Playing);
+  const [hint, setHint] = useState<string | null>(null);
+  const [isHintLoading, setIsHintLoading] = useState<boolean>(false);
+  const [shakeRowIndex, setShakeRowIndex] = useState<number | null>(null);
+  const [keyStates, setKeyStates] = useState<{ [key: string]: LetterState }>({});
+  const [activeCellIndex, setActiveCellIndex] = useState<number>(0);
+  const [theme, setTheme] = useState<'light' | 'dark'>(
+    () => (localStorage.getItem('theme') as 'light' | 'dark') || 'dark'
+  );
 
-    // Stats State
-    const [stats, setStats] = useState<GameStats>(() => {
-        const savedStats = localStorage.getItem('gameStats');
-        return savedStats ? JSON.parse(savedStats) : defaultStats;
-    });
+  useEffect(() => {
+    const root = window.document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+  
+  const toggleTheme = () => {
+    setTheme(prevTheme => (prevTheme === 'light' ? 'dark' : 'light'));
+  };
 
-    useEffect(() => {
-        localStorage.setItem('gameStats', JSON.stringify(stats));
-    }, [stats]);
 
+  const initializeGame = useCallback(() => {
+    setSolution(getNewWord());
+    setGuesses([]);
+    setCurrentGuess(' '.repeat(WORD_LENGTH));
+    setCurrentRowIndex(0);
+    setGameStatus(GameStatus.Playing);
+    setHint(null);
+    setIsHintLoading(false);
+    setShakeRowIndex(null);
+    setKeyStates({});
+    setActiveCellIndex(0);
+  }, []);
 
-    const updateStats = useCallback((won: boolean) => {
-        setStats(prev => {
-            const newStats = { ...prev };
-            newStats.gamesPlayed += 1;
-            if (won) {
-                newStats.wins += 1;
-                newStats.currentStreak += 1;
-                if (newStats.currentStreak > newStats.maxStreak) {
-                    newStats.maxStreak = newStats.currentStreak;
-                }
-                const newDistribution = { ...newStats.guessDistribution };
-                newDistribution[turn + 1] = (newDistribution[turn + 1] || 0) + 1;
-                newStats.guessDistribution = newDistribution;
-            } else {
-                newStats.currentStreak = 0;
-            }
-            return newStats;
+  useEffect(() => {
+    initializeGame();
+  }, [initializeGame]);
+
+  const handleCellClick = (index: number) => {
+    if (gameStatus === GameStatus.Playing) {
+      setActiveCellIndex(index);
+    }
+  };
+
+  const handleKeyInput = useCallback((key: string) => {
+    if (gameStatus !== GameStatus.Playing) return;
+
+    const upperKey = key.toUpperCase();
+
+    // Arrow key navigation
+    if (key === 'ArrowLeft') {
+      setActiveCellIndex(prev => Math.max(0, prev - 1));
+      return;
+    }
+    if (key === 'ArrowRight') {
+      setActiveCellIndex(prev => Math.min(WORD_LENGTH - 1, prev + 1));
+      return;
+    }
+
+    if (upperKey === 'ENTER') {
+      if (currentGuess.trim().length === WORD_LENGTH) {
+        // Submit guess
+        const submittedWord = currentGuess;
+        const calculatedStates = getLetterStates(submittedWord, solution);
+        const newGuessState: GuessState = { word: submittedWord, states: calculatedStates };
+        const newGuesses = [...guesses, newGuessState];
+
+        // Update key states
+        const newKeyStates = { ...keyStates };
+        submittedWord.split('').forEach((char, i) => {
+          const currentState = newKeyStates[char];
+          const newState = calculatedStates[i];
+          if (currentState === LetterState.Correct || (currentState === LetterState.Present && newState === LetterState.Absent)) {
+            return;
+          }
+          newKeyStates[char] = newState;
         });
-    }, [turn]);
+        setKeyStates(newKeyStates);
 
+        // Update game state
+        setGuesses(newGuesses);
+        setCurrentRowIndex(prev => prev + 1);
+        setCurrentGuess(' '.repeat(WORD_LENGTH));
+        setActiveCellIndex(0);
 
-    const resetGame = useCallback(() => {
-        const newState = getInitialState();
-        setSolution(newState.solution);
-        setGameState(newState.gameState);
-        setGuesses(newState.guesses);
-        setCurrentGuess(newState.currentGuess);
-        setTurn(newState.turn);
-        setUsedKeys(newState.usedKeys);
-        setIsShaking(false);
-        setHint(newState.hint);
-        setHintUsed(newState.hintUsed);
-        setIsHintLoading(newState.isHintLoading);
-    }, []);
+        if (submittedWord === solution) {
+          setGameStatus(GameStatus.Won);
+        } else if (newGuesses.length === MAX_GUESSES) {
+          setGameStatus(GameStatus.Lost);
+        } else {
+          // Incorrect guess animation
+          setShakeRowIndex(currentRowIndex);
+          setTimeout(() => setShakeRowIndex(null), 700);
+          
+          // Apply random penalty
+          const penalties: PenaltyType[] = [PenaltyType.HideLetter, PenaltyType.ShuffleLetters, PenaltyType.ScrambleColors];
+          const randomPenalty = penalties[Math.floor(Math.random() * penalties.length)];
+          const randomRowIndex = Math.floor(Math.random() * newGuesses.length);
+          
+          const guessesWithPenalty = [...newGuesses];
+          const targetGuess = { ...guessesWithPenalty[randomRowIndex] };
+          targetGuess.penalty = randomPenalty;
 
-    const handleGetHint = useCallback(async () => {
-        if (hintUsed || isHintLoading) return;
-        setIsHintLoading(true);
-        try {
-            const prompt = `Gere uma dica criativa e curta, em português, para a palavra de 5 letras "${solution}". A dica não deve conter a palavra em si, nem variações dela. A dica deve ter no máximo 15 palavras.`;
-            const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: prompt,
-            });
-            setHint(response.text);
-            setHintUsed(true);
-        } catch (error) {
-            console.error("Erro ao buscar dica da IA:", error);
-            alert("Não foi possível obter uma dica no momento. Tente novamente.");
-        } finally {
-            setIsHintLoading(false);
+          if (randomPenalty === PenaltyType.ShuffleLetters) {
+              let shuffledWord = shuffleArray(targetGuess.word.split('')).join('');
+              while (shuffledWord === targetGuess.word && targetGuess.word.length > 1) {
+                  shuffledWord = shuffleArray(targetGuess.word.split('')).join('');
+              }
+              targetGuess.penaltyData = { shuffledWord };
+          }
+          if (randomPenalty === PenaltyType.HideLetter) {
+              targetGuess.penaltyData = { hiddenIndex: Math.floor(Math.random() * WORD_LENGTH) };
+          }
+          if (randomPenalty === PenaltyType.ScrambleColors) {
+              targetGuess.penaltyData = { scrambledStates: shuffleArray(targetGuess.states) };
+          }
+
+          guessesWithPenalty[randomRowIndex] = targetGuess;
+          setGuesses(guessesWithPenalty);
         }
-    }, [solution, hintUsed, isHintLoading]);
+      } else {
+        setShakeRowIndex(currentRowIndex);
+        setTimeout(() => setShakeRowIndex(null), 700);
+      }
+    } else if (upperKey === 'BACKSPACE') {
+      const newGuessChars = currentGuess.split('');
+      const charAtActive = newGuessChars[activeCellIndex];
+      let indexToDelete = activeCellIndex;
 
-    const handleKeyPress = useCallback((key: string) => {
-        if (gameState !== GameState.Playing) return;
+      // If the current cell is empty and we are not at the beginning,
+      // target the previous cell for deletion.
+      if (charAtActive === ' ' && activeCellIndex > 0) {
+        indexToDelete = activeCellIndex - 1;
+      }
+      
+      // Clear the character at the target index.
+      newGuessChars[indexToDelete] = ' ';
+      setCurrentGuess(newGuessChars.join(''));
 
-        if (key === 'ENTER') {
-            if (currentGuess.length !== WORD_LENGTH) {
-                 setIsShaking(true);
-                 setTimeout(() => setIsShaking(false), 600);
-                return;
-            }
-            
-            setGuesses(prev => [...prev, currentGuess]);
-
-            const newUsedKeys = { ...usedKeys };
-            currentGuess.split('').forEach((letter, i) => {
-                const correctLetter = solution[i];
-                if (correctLetter === letter) {
-                    newUsedKeys[letter] = LetterState.Correct;
-                } else if (solution.includes(letter) && newUsedKeys[letter] !== LetterState.Correct) {
-                    newUsedKeys[letter] = LetterState.Present;
-                } else if (!solution.includes(letter)) {
-                    newUsedKeys[letter] = LetterState.Absent;
-                }
-            });
-            setUsedKeys(newUsedKeys);
-
-            const isWin = currentGuess === solution;
-            if (isWin) {
-                setGameState(GameState.Won);
-                updateStats(true);
-            } else if (turn + 1 === MAX_GUESSES) {
-                setGameState(GameState.Lost);
-                updateStats(false);
-            }
-
-            setTurn(prev => prev + 1);
-            setCurrentGuess('');
-            return;
-        }
-
-        if (key === 'BACKSPACE') {
-            setCurrentGuess(prev => prev.slice(0, -1));
-            return;
-        }
-
-        if (currentGuess.length < WORD_LENGTH && /^[a-zA-Z]$/.test(key)) {
-            setCurrentGuess(prev => prev + key.toUpperCase());
-        }
-    }, [currentGuess, gameState, turn, solution, usedKeys, updateStats]);
+      // Move the cursor to the now-empty spot.
+      setActiveCellIndex(indexToDelete);
+    } else if (/^[A-Z]$/.test(upperKey) && upperKey.length === 1) {
+      const newGuessChars = currentGuess.split('');
+      newGuessChars[activeCellIndex] = upperKey;
+      setCurrentGuess(newGuessChars.join(''));
+      setActiveCellIndex(prev => Math.min(WORD_LENGTH - 1, prev + 1));
+    }
+  }, [currentGuess, gameStatus, guesses, solution, currentRowIndex, keyStates, activeCellIndex]);
+  
+  const handleGetHint = async () => {
+    if (gameStatus !== GameStatus.Playing || isHintLoading || currentRowIndex >= MAX_GUESSES -1) return;
     
-    const handleShare = useCallback(() => {
-        const emojiMap = {
-            [LetterState.Correct]: '🟩',
-            [LetterState.Present]: '🟨',
-            [LetterState.Absent]: '⬛',
-        };
+    setIsHintLoading(true);
+    
+    // Penalty: obscure previous guesses and lose a turn
+    const penalizedGuesses = guesses.map(g => ({ ...g, isHintPenaltyApplied: true }));
+    const sacrificedGuess: GuessState = { 
+        word: ' '.repeat(WORD_LENGTH), 
+        states: Array(WORD_LENGTH).fill(LetterState.Empty),
+        isInvalidatedForHint: true 
+    };
+    const newGuesses = [...penalizedGuesses, sacrificedGuess];
+    setGuesses(newGuesses);
+    setCurrentRowIndex(prev => prev + 1);
+    setCurrentGuess(' '.repeat(WORD_LENGTH));
+    setActiveCellIndex(0);
 
-        const title = `Palavra-Dia ${gameState === GameState.Won ? guesses.length : 'X'}/${MAX_GUESSES}`;
+    const fetchedHint = await getWordHint(solution);
+    setHint(fetchedHint);
+    setIsHintLoading(false);
+
+    if (newGuesses.length >= MAX_GUESSES) {
+      setGameStatus(GameStatus.Lost);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault();
+      }
+      handleKeyInput(event.key);
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handleKeyInput]);
+  
+  const customStyles = `
+    @keyframes jiggle {
+      0%, 100% { transform: translateX(0); }
+      10% { transform: translateX(-2px) rotate(-1deg); }
+      20% { transform: translateX(2px) rotate(1deg); }
+      30% { transform: translateX(-3px) rotate(-2deg); }
+      40% { transform: translateX(3px) rotate(2deg); }
+      50% { transform: translateX(-3px) rotate(-2deg); }
+      60% { transform: translateX(3px) rotate(2deg); }
+      70% { transform: translateX(-2px) rotate(-1deg); }
+      80% { transform: translateX(2px) rotate(1deg); }
+      90% { transform: translateX(-1px) rotate(0); }
+    }
+    @keyframes fade-in {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .animate-jiggle { animation: jiggle 0.7s ease-in-out; }
+    .animate-fade-in { animation: fade-in 0.3s ease-out; }
+    .backface-hidden { backface-visibility: hidden; }
+
+    /* New Fireworks */
+    .fireworks-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .firework-particle {
+      position: absolute;
+      width: var(--particle-size);
+      height: var(--particle-size);
+      background: hsl(var(--hue), 100%, 65%);
+      border-radius: 50%;
+      opacity: 0;
+      /* The animation now loops indefinitely */
+      animation: firework-explode 1.8s ease-out infinite;
+      box-shadow: 0 0 10px hsl(var(--hue), 100%, 65%), 0 0 20px hsl(var(--hue), 100%, 50%);
+    }
+    @keyframes firework-explode {
+      0% {
+        /* Start at full size and visible */
+        transform: translate(0, 0) scale(1);
+        opacity: 1;
+      }
+      100% {
+        /* Explode outwards and fade away */
+        transform: translate(var(--x-end), var(--y-end)) scale(0);
+        opacity: 0;
+      }
+    }
+  `;
+
+  return (
+    <>
+      <style>{customStyles}</style>
+      <div className="flex flex-col items-center justify-between min-h-screen p-2 sm:p-4 font-sans bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 transition-colors duration-300">
+        <header className="relative text-center my-4 sm:my-8 w-full max-w-xl lg:max-w-3xl">
+          <div className="absolute top-0 right-0 sm:right-4">
+              <button
+                  onClick={toggleTheme}
+                  className="p-2 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
+                  aria-label="Toggle theme"
+              >
+                  {theme === 'light' ? <Moon size={24} /> : <Sun size={24} />}
+              </button>
+          </div>
+          <h1 className="text-4xl sm:text-5xl font-bold tracking-wider uppercase text-blue-600 dark:text-blue-500 flex items-center justify-center gap-3">
+            <BrainCircuit size={48} className="animate-pulse text-blue-500" /> Evil Termo
+          </h1>
+          <p className="text-slate-600 dark:text-slate-400 mt-2">Adivinhe a palavra. Nunca confie na dica anterior</p>
+        </header>
         
-        const grid = guesses.map(guess => {
-            const states = getGuessStates(guess, solution);
-            return states.map(state => emojiMap[state] || '⬛').join('');
-        }).join('\n');
+        <main className="flex flex-col items-center justify-center flex-grow w-full">
+          <GameBoard 
+            guesses={guesses}
+            currentGuess={currentGuess}
+            currentRowIndex={currentRowIndex}
+            solution={solution}
+            shakeRowIndex={shakeRowIndex}
+            activeCellIndex={activeCellIndex}
+            onCellClick={handleCellClick}
+          />
+          <Hint 
+            onGetHint={handleGetHint} 
+            hint={hint}
+            isLoading={isHintLoading}
+            gameStatus={gameStatus}
+          />
+          <Keyboard 
+            onKeyPress={handleKeyInput}
+            letterStates={keyStates}
+          />
+        </main>
 
-        const shareText = `${title}\n\n${grid}`;
-        navigator.clipboard.writeText(shareText);
-        setShowCopiedToast(true);
-        setTimeout(() => setShowCopiedToast(false), 3000);
-    }, [guesses, solution, gameState]);
-
-
-    useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            const isModalOpen = showHelpModal || showStatsModal || gameState !== GameState.Playing;
-            if (event.ctrlKey || event.metaKey || isModalOpen) return;
-            
-            let key = event.key.toUpperCase();
-            if (key === 'BACKSPACE' || key === 'ENTER') {
-                handleKeyPress(key);
-            } else if (key.length === 1 && key >= 'A' && key <= 'Z') {
-                handleKeyPress(key);
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [handleKeyPress, showHelpModal, showStatsModal, gameState]);
-
-    const HelpModal = () => (
-        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4" onClick={() => setShowHelpModal(false)}>
-             <div className="bg-gray-800 rounded-lg shadow-xl p-6 text-left max-w-md w-full mx-auto" onClick={e => e.stopPropagation()}>
-                <h2 className="text-2xl font-bold mb-4 text-white">Como Jogar</h2>
-                <p className="text-gray-300 mb-4">Adivinhe a palavra em 6 tentativas.</p>
-                <p className="text-gray-300 mb-4">Cada tentativa deve ser uma palavra válida de 5 letras. Pressione enter para submeter.</p>
-                <p className="text-gray-300 mb-4">Após cada tentativa, a cor das letras mudará para mostrar o quão perto você está da solução.</p>
-                 <p className="text-gray-300 mb-4">Use o ícone de lâmpada <LightBulbIcon className="h-5 w-5 inline-block -mt-1"/> para uma dica da IA após a segunda tentativa!</p>
-                <hr className="border-gray-600 my-4" />
-                <div className="space-y-4">
-                    <div>
-                        <strong className="block text-white mb-2">Exemplos</strong>
-                        <div className="flex items-center gap-2 mb-2">
-                           <div className="w-10 h-10 flex items-center justify-center bg-green-500 border-green-500 rounded font-bold">F</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">L</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">O</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">R</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">A</div>
-                        </div>
-                        <p className="text-gray-400">A letra <strong className="text-green-400">F</strong> está na palavra e na posição correta.</p>
-                    </div>
-                    <div>
-                        <div className="flex items-center gap-2 mb-2">
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">V</div>
-                           <div className="w-10 h-10 flex items-center justify-center bg-yellow-500 border-yellow-500 rounded font-bold">E</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">N</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">T</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">O</div>
-                        </div>
-                        <p className="text-gray-400">A letra <strong className="text-yellow-400">E</strong> está na palavra mas na posição errada.</p>
-                    </div>
-                     <div>
-                        <div className="flex items-center gap-2 mb-2">
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">R</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">O</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">S</div>
-                           <div className="w-10 h-10 flex items-center justify-center border-2 border-gray-500 rounded font-bold">T</div>
-                           <div className="w-10 h-10 flex items-center justify-center bg-gray-700 border-gray-700 rounded font-bold">O</div>
-                        </div>
-                        <p className="text-gray-400">A letra <strong className="text-gray-400">O</strong> não está na palavra.</p>
-                    </div>
-                </div>
-                 <button onClick={() => setShowHelpModal(false)} className="mt-6 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg">Entendi!</button>
-            </div>
-        </div>
-    );
-
-    return (
-        <div className="flex flex-col h-screen max-h-[100vh] w-full text-white p-2 sm:p-4">
-            {gameState === GameState.Won && <Fireworks />}
-            <Modal gameState={gameState} solution={solution} onReset={resetGame} onShare={handleShare} onShowStats={() => setShowStatsModal(true)} />
-            {showHelpModal && <HelpModal />}
-            {showStatsModal && <StatsModal stats={stats} onClose={() => setShowStatsModal(false)} />}
-            
-            {showCopiedToast && (
-              <div className="absolute top-10 left-1/2 -translate-x-1/2 bg-gray-100 text-gray-900 font-semibold py-2 px-4 rounded-full shadow-lg z-50 animate-fade-in-out">
-                Resultados copiados!
-              </div>
-            )}
-            
-            <header className="flex items-center justify-center relative border-b border-gray-700 pb-2 mb-4 sm:pb-4 sm:mb-8 w-full max-w-lg mx-auto">
-                 <div className="absolute left-0 top-1/2 -translate-y-1/2 flex gap-2">
-                    <button 
-                        onClick={handleGetHint}
-                        disabled={turn < 2 || hintUsed || isHintLoading || gameState !== GameState.Playing}
-                        className="text-gray-400 hover:text-white disabled:text-gray-600 disabled:cursor-not-allowed transition-colors"
-                        aria-label="Obter dica da IA"
-                        >
-                        {isHintLoading ? (
-                            <ArrowPathIcon className="h-6 w-6 sm:h-7 sm:w-7 animate-spin-slow" />
-                        ) : (
-                            <LightBulbIcon className="h-6 w-6 sm:h-7 sm:w-7" />
-                        )}
-                    </button>
-                 </div>
-                 <h1 className="text-3xl sm:text-4xl font-bold tracking-wider text-center">PALAVRA-DIA</h1>
-                 <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                    <button onClick={() => setShowStatsModal(true)} className="text-gray-400 hover:text-white" aria-label="Ver estatísticas">
-                        <ChartBarIcon className="h-6 w-6 sm:h-7 sm:w-7" />
-                    </button>
-                    <button onClick={() => setShowHelpModal(true)} className="text-gray-400 hover:text-white" aria-label="Ajuda">
-                        <QuestionMarkCircleIcon className="h-6 w-6 sm:h-7 sm:w-7" />
-                    </button>
-                 </div>
-            </header>
-            
-            {hint && (
-                <div className="absolute top-24 left-1/2 -translate-x-1/2 w-11/12 max-w-sm bg-indigo-800 text-white p-3 rounded-lg shadow-lg z-20 animate-fade-in-down">
-                    <div className="flex items-start justify-between gap-2">
-                        <p className="text-sm leading-tight"><strong className="font-bold">Dica da IA:</strong> {hint}</p>
-                        <button onClick={() => setHint(null)} className="text-indigo-200 hover:text-white flex-shrink-0 -mt-1 -mr-1">
-                            <XMarkIcon className="h-5 w-5" />
-                        </button>
-                    </div>
-                </div>
-            )}
-           
-            <main className="flex-grow flex flex-col items-center justify-center w-full">
-                <Grid guesses={guesses} currentGuess={currentGuess} solution={solution} turn={turn} isShaking={isShaking} />
-            </main>
-            
-            <footer className="w-full flex justify-center">
-                <Keyboard onKeyPress={handleKeyPress} usedKeys={usedKeys} />
-            </footer>
-        </div>
-    );
-}
+        <EndGameModal 
+          status={gameStatus} 
+          solution={solution} 
+          onPlayAgain={initializeGame} 
+        />
+        
+        <footer className="w-full text-center text-slate-500 dark:text-slate-400 text-sm py-4">
+          <p>Feito com React, Tailwind CSS, e Gemini API.</p>
+        </footer>
+      </div>
+    </>
+  );
+};
 
 export default App;

@@ -4,23 +4,26 @@ export enum LetterState {
   Present = 'present',
   Absent = 'absent',
   Empty = 'empty',
-  Tbd = 'tbd',
+  Invalid = 'invalid',
 }
 
-export enum GameState {
+export enum GameStatus {
   Playing = 'playing',
   Won = 'won',
   Lost = 'lost',
 }
 
-export interface GuessDistribution {
-  [key: number]: number; // e.g. { 1: 0, 2: 5, 3: 10, 4: 8, 5: 3, 6: 1 }
+export enum PenaltyType {
+  HideLetter = 'hide-letter',
+  ShuffleLetters = 'shuffle-letters',
+  ScrambleColors = 'scramble-colors',
 }
 
-export interface GameStats {
-  gamesPlayed: number;
-  wins: number;
-  currentStreak: number;
-  maxStreak: number;
-  guessDistribution: GuessDistribution;
+export interface GuessState {
+  word: string;
+  states: LetterState[];
+  penalty?: PenaltyType;
+  penaltyData?: any;
+  isHintPenaltyApplied?: boolean;
+  isInvalidatedForHint?: boolean;
 }

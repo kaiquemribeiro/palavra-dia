@@ -1,78 +1,61 @@
 
-import React, { useMemo } from 'react';
+import React from 'react';
 import { WORD_LENGTH } from '../constants';
-import { LetterState } from '../types';
-import Tile from './Tile';
+import { LetterState, PenaltyType } from '../types';
+import Cell from './Cell';
 
 interface RowProps {
   guess?: string;
-  solution?: string;
-  isCompleted?: boolean;
-  isCurrent?: boolean;
-  isShaking?: boolean;
+  states?: LetterState[];
+  penalty?: PenaltyType;
+  penaltyData?: any;
+  isHintPenaltyApplied?: boolean;
+  isSubmitted?: boolean;
+  isInvalidated?: boolean;
+  shake?: boolean;
+  isActiveRow?: boolean;
+  activeCellIndex?: number;
+  onCellClick?: (index: number) => void;
 }
 
-const getGuessStates = (guess: string, solution: string): LetterState[] => {
-  const solutionChars = solution.split('');
-  const guessChars = guess.split('');
-  const states: LetterState[] = Array(WORD_LENGTH).fill(LetterState.Absent);
-  const solutionLetterCount: Record<string, number> = {};
+const Row: React.FC<RowProps> = ({ guess = '', states = [], penalty, penaltyData, isHintPenaltyApplied = false, isSubmitted = false, isInvalidated = false, shake = false, isActiveRow = false, activeCellIndex, onCellClick }) => {
+  const animationClass = shake ? 'animate-jiggle' : '';
 
-  solutionChars.forEach(letter => {
-    solutionLetterCount[letter] = (solutionLetterCount[letter] || 0) + 1;
-  });
-
-  // 1st pass: find correct (green) letters
-  guessChars.forEach((letter, index) => {
-    if (solutionChars[index] === letter) {
-      states[index] = LetterState.Correct;
-      solutionLetterCount[letter] -= 1;
-    }
-  });
-
-  // 2nd pass: find present (yellow) letters
-  guessChars.forEach((letter, index) => {
-    if (states[index] !== LetterState.Correct) {
-      if (solutionLetterCount[letter] > 0) {
-        states[index] = LetterState.Present;
-        solutionLetterCount[letter] -= 1;
-      }
-    }
-  });
-
-  return states;
-};
-
-const Row: React.FC<RowProps> = ({ guess = '', solution = '', isCompleted = false, isCurrent = false, isShaking = false }) => {
-  const letters = guess.padEnd(WORD_LENGTH, ' ').split('');
-  const states = useMemo(() => isCompleted ? getGuessStates(guess, solution) : [], [isCompleted, guess, solution]);
-  const rowClass = isShaking ? 'animate-shake' : '';
-
-  if (isCompleted) {
-    return (
-      <div className={`grid grid-cols-5 gap-1.5 ${rowClass}`}>
-        {letters.map((letter, i) => (
-          <Tile key={i} letter={letter} state={states[i]} isRevealing={true} index={i} />
-        ))}
-      </div>
-    );
+  let displayGuess = guess;
+  if (penalty === PenaltyType.ShuffleLetters && penaltyData?.shuffledWord) {
+    displayGuess = penaltyData.shuffledWord;
   }
-
-  if (isCurrent) {
-     return (
-        <div className={`grid grid-cols-5 gap-1.5 ${rowClass}`}>
-            {letters.map((letter, i) => (
-                <Tile key={i} letter={letter.trim()} state={letter.trim() ? LetterState.Tbd : LetterState.Empty} />
-            ))}
-        </div>
-    );
+  
+  let displayStates = states;
+  if (penalty === PenaltyType.ScrambleColors && penaltyData?.scrambledStates) {
+    displayStates = penaltyData.scrambledStates;
   }
 
   return (
-    <div className="grid grid-cols-5 gap-1.5">
-      {Array.from({ length: WORD_LENGTH }).map((_, i) => (
-        <Tile key={i} />
-      ))}
+    <div className={`grid grid-cols-5 gap-2 ${animationClass}`}>
+      {Array.from({ length: WORD_LENGTH }).map((_, i) => {
+        let letter = displayGuess[i] || ' ';
+        let state = displayStates[i] || LetterState.Empty;
+
+        if (penalty === PenaltyType.HideLetter && penaltyData?.hiddenIndex === i) {
+          letter = ' ';
+        }
+
+        if (isHintPenaltyApplied) {
+            letter = 'X';
+            state = LetterState.Absent;
+        }
+
+        return <Cell 
+          key={i} 
+          letter={letter} 
+          state={state} 
+          isSubmitted={isSubmitted} 
+          isInvalidated={isInvalidated}
+          isActive={isActiveRow && activeCellIndex === i}
+          onClick={isActiveRow && onCellClick ? () => onCellClick(i) : undefined}
+        />;
+      })}
     </div>
   );
 };
